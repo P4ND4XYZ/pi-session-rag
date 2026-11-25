@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use crate::session::debug;
+use crate::session::Session;
 
 pub mod session;
 
@@ -22,7 +22,15 @@ fn main() {
         Command::Import { path } => {
             println!("import : {}", path.display());
             if path.is_file() {
-                debug(&path);
+                match Session::new(&path) {
+                    Ok(session) => {
+                        let entry = session.branch();
+
+                    }
+                    Err(e) => {
+                        eprintln!("{}", e)
+                    }
+                }
             } else {
                 eprintln!("must be file.");
             }
