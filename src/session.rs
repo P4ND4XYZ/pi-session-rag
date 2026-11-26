@@ -1,12 +1,17 @@
+use rusqlite::{Connection, params};
 use serde_json::Value;
 
 use serde::Deserialize;
 
 use std::{
     collections::HashMap,
+    error::Error,
     fs::File,
     io::{self, BufRead, BufReader},
+    path::Path,
 };
+
+use crate::db::DB_PATH;
 
 #[derive(Deserialize, Debug)]
 struct SessionHeader {
@@ -57,6 +62,10 @@ impl Session {
         Self::from_records(read_records(path)?)
     }
 
+    fn pi_session_id(&self) -> &str {
+        &self.header.id
+    }
+
     fn from_records(records: Vec<Value>) -> io::Result<Self> {
         let mut records = records.into_iter();
         let header_value = records
@@ -94,8 +103,6 @@ impl Session {
             last_entry_id = Some(id);
         }
 
-        println!("{:?}", header);
-
         Ok(Self {
             header,
             records: entries,
@@ -132,15 +139,16 @@ impl Session {
         Ok(branch)
     }
 
-    pub fn messages_for_import(&self) -> io::Result<()> {
+    fn messages_for_import(&self) -> io::Result<Vec<(String, String)>> {
         let branch = self.branch()?;
+        let mut messages = Vec::new();
 
         for e in branch {
             let Some(message) = e.message.as_ref() else {
                 continue;
             };
 
-            if !matches!(message.role.as_str(), "user" | "assistent") {
+            if !matches!(message.role.as_str(), "user" | "assistant") {
                 continue;
             }
 
@@ -158,7 +166,34 @@ impl Session {
             if text.trim().is_empty() {
                 continue;
             }
+
+            messages.push((e.id.clone(), text));
         }
+
+        Ok(messages)
+    }
+
+    pub fn import_session(path: &Path) -> Result<(), Box<dyn Error>> {
+        let session = Session::new(path)?;
+        let messages = session.messages_for_import()?;
+
+        let mut connection = Connection::open(DB_PATH)?;
+        connection.execute_batch(include_str!("schema.sql"))?;
+
+        let tx = connection.transaction()?;
+        tx.execute(
+            "INSERT INTO sessions (pi_session_id, source_path) VALUES (?1, ?2)",
+            params![session.pi_session_id(), path.to_string_lossy().as_ref()],
+        )?;
+        let session_id = tx.last_insert_rowid();
+
+        for (pi_entry_id, text) in messages {
+            tx.execute(
+                "INSERT INTO messages (session_id, pi_entry_id, text) VALUES (?1, ?2, ?3)",
+                params![session_id, pi_entry_id, text],
+            )?;
+        }
+        tx.commit()?;
 
         Ok(())
     }
@@ -180,29 +215,6 @@ fn read_records(path: &std::path::Path) -> io::Result<Vec<Value>> {
             })
         })
         .collect()
-}
-
-pub fn debug(path: &std::path::Path) -> io::Result<()> {
-    let records = read_records(path)?;
-
-    for (index, record) in records.iter().enumerate() {
-        let line = index + 1;
-        let record_type = record.get("type").and_then(Value::as_str);
-
-        match record_type {
-            Some("session") => {
-                let version = record.get("version").and_then(Value::as_u64);
-                match version {
-                    Some(version) => println!("{line}: type=session, version={version}"),
-                    None => println!("{line}: type=session, not found version"),
-                }
-            }
-            Some(record_type) => println!("{line}: type={record_type}"),
-            None => println!("{line}: not found type"),
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
